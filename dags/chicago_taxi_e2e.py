@@ -35,6 +35,9 @@ DEFAULT_START = os.environ.get("PIPELINE_START_DATE", "2023-01-01")
 DEFAULT_END = os.environ.get("PIPELINE_END_DATE", "2023-01-08")
 EXTRACT_PARALLELISM = int(os.environ.get("EXTRACT_PARALLELISM", "4"))
 SPARK_POOL = "spark"  # 1 slot : les jobs Spark locaux s'exécutent l'un après l'autre
+# Étapes Spark idempotentes : un retry est sans danger (erreur transitoire S3, OOM...).
+# Les AirflowFailException (écart landing/bronze, gate qualité) ne sont jamais rejouées.
+SPARK_RETRY: dict[str, Any] = {"retries": 1, "retry_delay": timedelta(minutes=1)}
 
 
 @dag(
@@ -87,7 +90,7 @@ def chicago_taxi_e2e() -> None:
         get_current_context()["trip_day"] = day  # libellé lisible de la tâche mappée dans l'UI
         return _extract(day, start, end, force)
 
-    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=45))
+    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=45), **SPARK_RETRY)
     def load_bronze(manifests: list[dict[str, Any]]) -> dict[str, int]:
         from taxi_pipeline.jobs import load_bronze as _load
 
@@ -102,13 +105,13 @@ def chicago_taxi_e2e() -> None:
             )
         return result
 
-    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=15))
+    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=15), **SPARK_RETRY)
     def load_reference_data() -> dict[str, int]:
         from taxi_pipeline.jobs import load_reference_data as _ref
 
         return _ref()
 
-    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=60))
+    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=60), **SPARK_RETRY)
     def transform_silver(start: str, end: str) -> dict[str, Any]:
         from taxi_pipeline.jobs import transform_silver as _silver
 
@@ -128,7 +131,7 @@ def chicago_taxi_e2e() -> None:
             raise AirflowFailException(silver["gate_message"])
         return {"valid_rows": silver["valid_rows"], "reject_pct": silver["reject_pct"]}
 
-    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=45))
+    @task(pool=SPARK_POOL, execution_timeout=timedelta(minutes=45), **SPARK_RETRY)
     def build_gold(start: str, end: str) -> dict[str, int]:
         from taxi_pipeline.jobs import build_gold as _gold
 

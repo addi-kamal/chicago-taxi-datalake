@@ -29,6 +29,10 @@ class SourceSchemaError(RuntimeError):
     """L'en-tête renvoyé par la source ne correspond pas au contrat attendu."""
 
 
+class SourceCompletenessError(RuntimeError):
+    """Le nombre de lignes reçues ne correspond pas au count(*) de la source."""
+
+
 @dataclass(frozen=True)
 class SodaPage:
     offset: int
@@ -93,6 +97,22 @@ class SodaClient:
         validate_header(header)
         rows = [row for row in reader if row]
         return SodaPage(offset=offset, rows=rows)
+
+    def count_day(self, day: date) -> int:
+        """Nombre de trajets de la journée selon la source (count(*))."""
+        resp = self.session.get(
+            self.url,
+            params={"$select": "count(*)", "$where": day_where_clause(day)},
+            timeout=self.timeout_s,
+        )
+        resp.raise_for_status()
+        resp.encoding = "utf-8"
+        reader = csv.reader(io.StringIO(resp.text))
+        next(reader, None)  # en-tête
+        row = next(reader, None)
+        if not row:
+            raise SourceSchemaError("Réponse count(*) vide")
+        return int(row[0])
 
     def iter_pages(self, day: date) -> Iterator[SodaPage]:
         """Itère sur les pages d'une journée jusqu'à une page incomplète."""

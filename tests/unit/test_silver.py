@@ -115,3 +115,23 @@ def test_transformation_is_deterministic(bronze_sample) -> None:  # type: ignore
     a = build_silver(bronze_sample, SAMPLE_START, SAMPLE_END).valid
     b = build_silver(bronze_sample, SAMPLE_START, SAMPLE_END).valid
     assert a.exceptAll(b).count() == 0 and b.exceptAll(a).count() == 0
+
+
+def test_dedup_is_independent_of_row_order(bronze_sample) -> None:  # type: ignore[no-untyped-def]
+    """Deux doublons différents, même fichier : la ligne gardée ne dépend pas de l'ordre."""
+    base = bronze_sample.where(F.col("trip_id").isNotNull()).orderBy("trip_id").limit(1).cache()
+    a = base.withColumn("fare", F.lit("10.00"))
+    b = base.withColumn("fare", F.lit("99.00"))
+
+    def kept_fare(df):  # type: ignore[no-untyped-def]
+        rows = build_silver(df, SAMPLE_START, SAMPLE_END).annotated.select("_t_fare").collect()
+        assert len(rows) == 1
+        return rows[0][0]
+
+    assert kept_fare(a.unionByName(b)) == kept_fare(b.unionByName(a))
+
+
+def test_gate_fails_on_empty_input() -> None:
+    results = [{"rule": "total_rejected", "failed_pct": 0.0, "checked_rows": 0, "failed_rows": 0}]
+    gate = evaluate_gate(results, max_reject_pct=5)
+    assert not gate.passed and "source vide" in gate.message()

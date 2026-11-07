@@ -6,7 +6,7 @@ Trois niveaux :
 - **nettoyage** : une valeur invalide est mise à null (zone, coordonnées).
 
 Les résultats sont historisés dans ``silver.dq_results`` ; le pipeline échoue si
-le taux de rejet bloquant dépasse ``DQ_MAX_REJECT_PCT``.
+le taux de rejet bloquant dépasse ``DQ_MAX_REJECT_PCT`` ou si aucune ligne n'est à contrôler.
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ from pyspark.sql import functions as F
 
 from taxi_pipeline.schemas import AMOUNT_COLUMNS
 
-MAX_TRIP_SECONDS = 86_400
+# 6 h : au-delà, presque toujours un compteur resté allumé (p99,9 observé ~4,7 h).
+MAX_TRIP_SECONDS = 21_600
 MAX_TRIP_MILES = 500.0
 MAX_SPEED_MPH = 100.0
 AMOUNT_TOLERANCE = 1.0
@@ -146,6 +147,8 @@ class GateResult:
     rejected_rows: int
 
     def message(self) -> str:
+        if self.checked_rows == 0:
+            return "Contrôle qualité ÉCHEC : aucune ligne à contrôler (source vide ?)"
         status = "OK" if self.passed else "ÉCHEC"
         return (
             f"Contrôle qualité {status} : {self.rejected_rows}/{self.checked_rows} lignes rejetées "
@@ -224,11 +227,12 @@ def compute_dq_results(
 
 def evaluate_gate(results: list[dict[str, Any]], max_reject_pct: float) -> GateResult:
     total = next(r for r in results if r["rule"] == "total_rejected")
+    checked = int(total["checked_rows"])
     pct = float(total["failed_pct"])
     return GateResult(
-        passed=pct <= max_reject_pct,
+        passed=checked > 0 and pct <= max_reject_pct,
         reject_pct=pct,
         threshold_pct=max_reject_pct,
-        checked_rows=int(total["checked_rows"]),
+        checked_rows=checked,
         rejected_rows=int(total["failed_rows"]),
     )

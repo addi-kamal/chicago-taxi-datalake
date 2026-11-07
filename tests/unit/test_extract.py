@@ -15,7 +15,12 @@ from taxi_pipeline.extract.landing import (
     extract_day_from_soda,
     extract_days_from_sample,
 )
-from taxi_pipeline.extract.soda import SodaClient, SourceSchemaError, day_where_clause
+from taxi_pipeline.extract.soda import (
+    SodaClient,
+    SourceCompletenessError,
+    SourceSchemaError,
+    day_where_clause,
+)
 from taxi_pipeline.schemas import SOURCE_COLUMNS
 from tests.conftest import SAMPLE_CSV
 
@@ -33,13 +38,18 @@ class FakeResponse:
 class FakeSession:
     """Simule l'API SODA : renvoie `total` lignes, paginées selon $limit/$offset."""
 
-    def __init__(self, total: int, header: list[str] | None = None) -> None:
+    def __init__(
+        self, total: int, header: list[str] | None = None, reported_total: int | None = None
+    ) -> None:
         self.total = total
+        self.reported_total = total if reported_total is None else reported_total
         self.header = header or list(SOURCE_COLUMNS)
         self.headers: dict[str, str] = {}
         self.calls: list[dict[str, str]] = []
 
     def get(self, url: str, params: dict[str, str], timeout: int) -> FakeResponse:
+        if params.get("$select") == "count(*)":
+            return FakeResponse(f'"count"\n"{self.reported_total}"\n')
         self.calls.append(params)
         offset, limit = int(params["$offset"]), int(params["$limit"])
         buf = io.StringIO()
@@ -140,3 +150,18 @@ def test_sample_mode_splits_by_day_and_keeps_all_rows() -> None:
         FakeStore(), SETTINGS, days, str(SAMPLE_CSV), only=date(2023, 1, 2)
     )
     assert len(single) == 1 and single[0].rows == results[1].rows
+
+
+def test_empty_source_day_is_not_marked_complete() -> None:
+    store = FakeStore()
+    with pytest.raises(SourceCompletenessError):
+        extract_day_from_soda(_client(FakeSession(total=0)), store, SETTINGS, DAY)
+    assert not any(key.endswith(MANIFEST_FILE) for _, key in store.objects)
+
+
+def test_row_count_mismatch_with_source_fails() -> None:
+    session = FakeSession(total=250, reported_total=300)
+    store = FakeStore()
+    with pytest.raises(SourceCompletenessError, match="300"):
+        extract_day_from_soda(_client(session), store, SETTINGS, DAY)
+    assert not any(key.endswith(MANIFEST_FILE) for _, key in store.objects)

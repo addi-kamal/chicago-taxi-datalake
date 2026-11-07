@@ -97,3 +97,22 @@ def test_timestamps_are_stored_without_timezone(it_spark: Any, it_settings: Sett
     assert rows[0][0] == "timestamp(6)"  # sans fuseau côté Trino
     assert rows[0][1].startswith("2023-01-01 08:45:00")
     assert date(2023, 1, 1) <= it_settings.pipeline_start_date
+
+
+def test_failed_gate_leaves_silver_untouched(it_spark: Any, it_settings: Settings) -> None:
+    silver = it_settings.table("silver", "taxi_trips")
+    dq = it_settings.table("silver", "dq_results")
+    start, end = it_settings.pipeline_start_date, it_settings.pipeline_end_date
+    strict = it_settings.model_copy(update={"dq_max_reject_pct": 0.0})
+
+    # On vide un jour de silver : si le gate échouait APRÈS l'écriture, il serait recréé.
+    it_spark.sql(f"DELETE FROM {silver} WHERE trip_date = DATE '2023-01-01'")
+    before = it_spark.table(silver).count()
+    try:
+        out = transform_silver(it_spark, strict, start, end, "it-gate")
+        assert not out["gate_passed"] and out["silver_written"] is False
+        assert it_spark.table(silver).count() == before  # silver non modifié
+    finally:
+        it_spark.sql(f"DELETE FROM {dq} WHERE run_id = 'it-gate'")
+        transform_silver(it_spark, it_settings, start, end, "it-restore")  # restaure silver
+        it_spark.sql(f"DELETE FROM {dq} WHERE run_id = 'it-restore'")

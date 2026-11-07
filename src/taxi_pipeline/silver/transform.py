@@ -21,7 +21,12 @@ from datetime import date
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
-from taxi_pipeline.schemas import AMOUNT_COLUMNS, REJECTED_COLUMNS, SILVER_COLUMNS
+from taxi_pipeline.schemas import (
+    AMOUNT_COLUMNS,
+    REJECTED_COLUMNS,
+    SILVER_COLUMNS,
+    SOURCE_COLUMNS,
+)
 from taxi_pipeline.silver.quality import (
     CHICAGO_BBOX,
     TYPED_PREFIX,
@@ -156,12 +161,19 @@ def clean_columns(parsed: DataFrame) -> DataFrame:
 def deduplicate(df: DataFrame) -> DataFrame:
     """Garde la version la plus récemment ingérée de chaque ``trip_id``.
 
+    Départage final par hash du contenu brut : deux lignes de même ``trip_id`` issues du
+    même fichier (même ``_ingested_at``, même ``_source_file``) donnent un résultat stable,
+    quel que soit l'ordre de lecture.
+
     Les lignes sans ``trip_id`` ne sont pas dédoublonnées (elles seront rejetées
     individuellement par la règle ``missing_trip_id``).
     """
     trip_id = typed("trip_id")
+    row_hash = F.sha2(F.to_json(F.struct(*[F.col(c) for c in SOURCE_COLUMNS])), 256)
     window = Window.partitionBy(trip_id).orderBy(
-        F.col("_ingested_at").desc(), F.col("_source_file").desc()
+        F.col("_ingested_at").desc(),
+        F.col("_source_file").desc(),
+        row_hash.asc(),
     )
     with_id = (
         df.where(trip_id.isNotNull())

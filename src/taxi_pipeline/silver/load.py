@@ -85,7 +85,12 @@ def load_community_areas(spark: SparkSession, settings: Settings) -> dict[str, i
 def transform_silver(
     spark: SparkSession, settings: Settings, start: date, end: date, run_id: str
 ) -> dict[str, Any]:
-    """Bronze [start, end) -> silver + quarantaine + résultats qualité."""
+    """Bronze [start, end) -> silver + quarantaine + résultats qualité.
+
+    Audit puis publication : les métriques et le gate sont calculés AVANT toute écriture.
+    Si le gate échoue, silver et quarantaine ne sont pas modifiés ; seuls les résultats
+    qualité sont historisés (le dashboard qualité montre l'échec).
+    """
     bronze_table = settings.table("bronze", BRONZE_TRIPS.name)
     last_day = end - timedelta(days=1)
     raw = spark.table(bronze_table).where(F.col("trip_date").between(F.lit(start), F.lit(last_day)))
@@ -98,20 +103,10 @@ def transform_silver(
         valid = frames.valid
         rejected = frames.rejected
 
-        silver_table = ensure_table(spark, settings, SILVER_TRIPS)
-        valid.writeTo(silver_table).overwritePartitions()
-
-        rejected_table = ensure_table(spark, settings, SILVER_REJECTED)
-        # overwrite(filtre) : remplace aussi les jours qui n'ont plus aucun rejet.
-        rejected.writeTo(rejected_table).overwrite(
-            F.col("trip_date").between(F.lit(start), F.lit(last_day))
-        )
-
+        # 1. Audit : métriques et gate, sans rien écrire.
         dq = compute_dq_results(
             annotated,
-            spark.table(silver_table).where(
-                F.col("trip_date").between(F.lit(start), F.lit(last_day))
-            ),
+            valid,
             input_rows=input_rows,
             duplicates_removed=input_rows - deduped_rows,
             run_id=run_id,
@@ -119,6 +114,20 @@ def transform_silver(
             period_end=end,
             checked_at=datetime.now(UTC).replace(tzinfo=None),
         )
+        gate = evaluate_gate(dq, settings.dq_max_reject_pct)
+
+        # 2. Publication : seulement si le gate passe.
+        if gate.passed:
+            silver_table = ensure_table(spark, settings, SILVER_TRIPS)
+            valid.writeTo(silver_table).overwritePartitions()
+
+            rejected_table = ensure_table(spark, settings, SILVER_REJECTED)
+            # overwrite(filtre) : remplace aussi les jours qui n'ont plus aucun rejet.
+            rejected.writeTo(rejected_table).overwrite(
+                F.col("trip_date").between(F.lit(start), F.lit(last_day))
+            )
+        else:
+            log.error("%s : silver et quarantaine NON modifiés", gate.message())
     finally:
         annotated.unpersist()
 
@@ -126,15 +135,14 @@ def transform_silver(
     spark.sql(f"DELETE FROM {dq_table} WHERE run_id = '{_sql_str(run_id)}'")
     spark.createDataFrame(dq, DQ_SCHEMA).coalesce(1).writeTo(dq_table).append()
 
-    gate = evaluate_gate(dq, settings.dq_max_reject_pct)
-    valid_rows = next(r["checked_rows"] for r in dq if r["rule"] == "is_duration_outlier")
     summary: dict[str, Any] = {
         "input_rows": input_rows,
         "duplicates_removed": input_rows - deduped_rows,
-        "valid_rows": int(valid_rows),
+        "valid_rows": gate.checked_rows - gate.rejected_rows,
         "rejected_rows": gate.rejected_rows,
         "reject_pct": gate.reject_pct,
         "gate_passed": gate.passed,
+        "silver_written": gate.passed,
         "gate_message": gate.message(),
         "dq_results": [
             {k: (v.isoformat() if isinstance(v, date | datetime) else v) for k, v in r.items()}
@@ -142,10 +150,11 @@ def transform_silver(
         ],
     }
     log.info(
-        "Silver : %d entrées, %d doublons, %d valides, %d rejetées",
+        "Silver : %d entrées, %d doublons, %d valides, %d rejetées (publié : %s)",
         input_rows,
         summary["duplicates_removed"],
         summary["valid_rows"],
         summary["rejected_rows"],
+        gate.passed,
     )
     return summary

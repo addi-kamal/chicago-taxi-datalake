@@ -69,7 +69,8 @@ def wait_for_trino(settings: Settings, timeout_s: int = 300) -> None:
 def validate_serving_layer(
     settings: Settings, start: date, end: date, expected_silver_rows: int | None = None
 ) -> list[CheckResult]:
-    """Échoue si une table gold est vide ou si Trino ne relit pas le volume silver attendu."""
+    """Échoue si une table gold est vide, si Trino ne relit pas le volume silver attendu,
+    ou si gold.daily_revenue ne réconcilie pas avec silver (trajets et CA)."""
     wait_for_trino(settings)
     last_day = end - timedelta(days=1)
     results: list[CheckResult] = []
@@ -93,6 +94,40 @@ def validate_serving_layer(
                 silver_rows == expected_silver_rows,
             )
         )
+
+    # Réconciliation gold / silver sur le même périmètre de jours : trajets et CA exacts
+    # (décimales des deux côtés, comparées en centimes).
+    daily = settings.table("gold", "daily_revenue")
+    period = f"BETWEEN DATE '{start}' AND DATE '{last_day}'"
+    gold_trips, gold_cents = query(
+        settings,
+        "SELECT coalesce(sum(trips), 0), "
+        "CAST(round(coalesce(sum(total_revenue), 0) * 100) AS bigint) "
+        f"FROM {daily} WHERE trip_date {period}",
+    )[0]
+    silver_cents = int(
+        query(
+            settings,
+            "SELECT CAST(round(coalesce(sum(trip_total), 0) * 100) AS bigint) "
+            f"FROM {silver} WHERE trip_date {period}",
+        )[0][0]
+    )
+    results.append(
+        CheckResult(
+            "gold.daily_revenue trips == silver",
+            int(gold_trips),
+            f"== {silver_rows}",
+            int(gold_trips) == silver_rows,
+        )
+    )
+    results.append(
+        CheckResult(
+            "gold.daily_revenue revenue (cents) == silver",
+            int(gold_cents),
+            f"== {silver_cents}",
+            int(gold_cents) == silver_cents,
+        )
+    )
 
     for spec in GOLD_TABLES:
         table = settings.table("gold", spec.name)

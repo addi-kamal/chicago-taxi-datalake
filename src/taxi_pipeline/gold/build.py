@@ -56,6 +56,10 @@ def build_gold(spark: SparkSession, settings: Settings, start: date, end: date) 
     ]
     counts: dict[str, int] = {}
     try:
+        # Défense en profondeur (le gate qualité échoue déjà à 0 ligne) : un mois gold
+        # n'est jamais écrasé par du vide.
+        if trips.limit(1).count() == 0:
+            raise ValueError(f"Silver vide sur {m_start} -> {m_end} : gold non modifié")
         for spec, build in builders:
             table = ensure_table(spark, settings, spec)
             # Tables gold petites : un fichier par partition mensuelle.

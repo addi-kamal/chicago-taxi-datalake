@@ -280,13 +280,13 @@ report ◄─ publish_dashboard ◄─ validate_serving_layer ◄─ build_gold 
 | Tâche | Moteur | Ce qu'elle fait |
 |---|---|---|
 | `plan_period` | Python | valide la période (paramètres du DAG) et liste les jours |
-| `extract_day` | Python | télécharge un jour depuis SODA (`$order=trip_id`, pages de 50 000), contrôle l'en-tête, écrit le CSV puis le manifest ; jour déjà présent → sauté |
+| `extract_day` | Python | télécharge un jour depuis SODA (`$order=trip_id`, pages de 50 000), contrôle l'en-tête et le nombre de lignes reçues contre le `count(*)` de la source (échec si écart ou jour vide), écrit le CSV puis le manifest ; jour déjà présent → sauté |
 | `load_bronze` | Spark | CSV → `bronze.taxi_trips_raw` ; vérifie que le nombre de lignes chargées = lignes téléchargées |
 | `load_reference_data` | Spark | `seeds/community_areas.csv` → `silver.dim_community_area` |
-| `transform_silver` | Spark | typage, nettoyage, dédoublonnage, règles qualité → silver + quarantaine + `dq_results` |
-| `quality_gate` | Python | affiche les résultats qualité ; **fait échouer le run** si le taux de rejet dépasse `DQ_MAX_REJECT_PCT` |
+| `transform_silver` | Spark | typage, nettoyage, dédoublonnage, règles qualité, calcul du gate **avant** écriture → silver + quarantaine (si gate OK) + `dq_results` |
+| `quality_gate` | Python | affiche les résultats qualité ; **fait échouer le run** si le taux de rejet dépasse `DQ_MAX_REJECT_PCT` ou si aucune ligne n'est à contrôler |
 | `build_gold` | Spark | recalcule les 5 tables gold sur les mois complets touchés |
-| `validate_serving_layer` | Trino | Trino relit silver (même volume que Spark) et chaque table gold (non vide) |
+| `validate_serving_layer` | Trino | Trino relit silver (même volume que Spark), chaque table gold (non vide) et réconcilie `gold.daily_revenue` avec silver (trajets et CA au centime) |
 | `publish_dashboard` | API Superset | crée/rafraîchit connexion, datasets, graphiques et les 2 dashboards |
 | `report` | Python | récapitulatif des volumes et URL des dashboards |
 
@@ -349,14 +349,19 @@ recalculé.
 | Niveau | Règles | Effet |
 |---|---|---|
 | **Bloquant** | `trip_id` absent ; début absent, illisible ou hors période ; fin < début ; montant négatif | ligne en quarantaine (`taxi_trips_rejected`) |
-| **Signalé** | durée ≤ 0 ou > 24 h ; distance < 0 ou > 500 mi ou vitesse > 100 mph ; total ≠ somme des composantes (± 1 $) | ligne conservée, flag `is_*` |
+| **Signalé** | durée ≤ 0 ou > 6 h ; distance < 0 ou > 500 mi ou vitesse > 100 mph ; total ≠ somme des composantes (± 1 $) | ligne conservée, flag `is_*` |
 | **Nettoyage** | community area hors 1-77 ; coordonnées hors de Chicago | valeur mise à null |
-| Info | doublons de `trip_id` | garde l'ingestion la plus récente |
+| Info | doublons de `trip_id` | garde l'ingestion la plus récente (départage final par hash du contenu : résultat indépendant de l'ordre de lecture) |
 
-Chaque exécution historise ses métriques dans `silver.dq_results` (visibles dans le dashboard Qualité des données) et
-la tâche `quality_gate` arrête le pipeline avant gold si le taux de rejet bloquant dépasse
-`DQ_MAX_REJECT_PCT` (5 %). Sur données réelles (10/01/2023, 14 255 trajets) : 0 rejet, 1,8 %
-d'outliers de durée.
+Chaque exécution historise ses métriques dans `silver.dq_results` (visibles dans le dashboard
+Qualité des données). Le gate est évalué **avant** toute écriture : si le taux de rejet bloquant
+dépasse `DQ_MAX_REJECT_PCT` (5 %) ou si aucune ligne n'est à contrôler, silver et quarantaine ne
+sont pas modifiés et la tâche `quality_gate` fait échouer le run avant gold. Sur la semaine par
+défaut (83 667 trajets) : 0 rejet, 2,0 % d'outliers de durée (1 706 trajets, dont 70 de plus de 6 h, le reste à durée nulle ou absente).
+
+Le seuil de durée (6 h) vient de la distribution observée : 99,9 % des trajets durent moins de
+4,7 h, et au-delà de 6 h il s'agit presque toujours d'un compteur resté allumé. Les trajets à
+0 mile ne sont volontairement pas signalés : les exclure est une décision métier.
 
 **Pourquoi trois niveaux** : une ligne fausse ne doit pas polluer les KPI, mais on ne la supprime
 pas (la quarantaine permet de l'analyser) ; une ligne suspecte n'est pas forcément fausse (le flag
@@ -553,6 +558,11 @@ docker compose exec airflow-scheduler \
 | API | contrat HTTP, validation des entrées, paramètres SQL (Trino remplacé par une fausse base) | `make test-api` |
 | Statique | `ruff` (lint + format), `mypy --strict` | `make lint` (après `make dev-install`) |
 
+**Intégration continue** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) : à chaque push et
+pull request, lint, typage, tests unitaires et tests de l'API. Les tests d'intégration ne tournent
+pas en CI : ils demandent la stack Compose complète (MinIO, PostgreSQL, Trino) et se lancent en
+local avec `make test-integration` ou `make verify`.
+
 Les tests d'intégration utilisent des namespaces dédiés (`it_bronze`, `it_silver`, `it_gold`) et
 une landing dédiée : ils ne touchent pas aux données du pipeline principal et nettoient leurs
 tables en fin d'exécution.
@@ -566,6 +576,7 @@ Le jeu d'exemple est généré de façon déterministe par
 ```
 .
 ├── docker-compose.yml          # toute la stack ; valeurs par défaut intégrées
+├── .github/workflows/ci.yml    # CI : lint, typage, tests unitaires et API
 ├── .env.example                # modèle de .env (secrets générés par scripts/generate_env.py)
 ├── Makefile                    # raccourcis d'exploitation
 ├── pyproject.toml              # dépendances figées, ruff, mypy, pytest
@@ -599,12 +610,14 @@ Le jeu d'exemple est généré de façon déterministe par
 
 ## 13. Limites et pistes d'évolution
 
-- **Écriture silver** : remplacement dynamique de partitions. Un jour devenu entièrement invalide
-  lors d'une relance n'est pas purgé ; évolution vers *write-audit-publish* avec les branches
-  Iceberg, ce qui permettrait aussi de publier silver seulement après le contrôle qualité.
-- **Incrémental** : le DAG traite une période paramétrable ; une planification quotidienne
-  (`schedule="@daily"`, période = `data_interval`) ne demande que de changer la planification,
-  les étapes étant déjà idempotentes par jour.
+- **Écriture silver** : audit puis publication, le gate est évalué avant l'écriture. Un jour
+  devenu entièrement invalide lors d'une relance n'est toujours pas purgé. Une vraie version
+  *write-audit-publish* utiliserait les branches Iceberg (écrire sur une branche, auditer, puis
+  fast-forward).
+- **Incrémental** : le DAG traite une période paramétrable (paramètres du DAG). Passer en
+  exécution quotidienne demande de faire lire `data_interval_start/end` à `plan_period` pour les
+  runs planifiés, et de pointer `SODA_DATASET_ID` vers le dataset 2024+ (le dataset 2013-2023
+  est figé). Les étapes sont déjà idempotentes par jour.
 - **Source** : le dataset 2013-2023 est figé ; les trajets 2024+ sont publiés dans un autre
   dataset SODA, qu'il suffit de passer en paramètre (`SODA_DATASET_ID`), schéma à vérifier.
 - **Observabilité** : alerting (callbacks Airflow vers Teams/Slack/e-mail), lineage OpenLineage

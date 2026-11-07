@@ -21,7 +21,11 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from taxi_pipeline.config import Settings
-from taxi_pipeline.extract.soda import SodaClient, day_where_clause
+from taxi_pipeline.extract.soda import (
+    SodaClient,
+    SourceCompletenessError,
+    day_where_clause,
+)
 from taxi_pipeline.schemas import SOURCE_COLUMNS
 from taxi_pipeline.storage import ObjectStore
 
@@ -135,6 +139,13 @@ def extract_day_from_soda(
                 writer.writerows(page.rows)
                 rows += len(page.rows)
                 pages += 1
+        # Contrôle de complétude AVANT le manifest : un jour vide ou tronqué n'est jamais
+        # marqué comme terminé, il sera retéléchargé au prochain essai.
+        expected = client.count_day(day)
+        if rows == 0 or rows != expected:
+            raise SourceCompletenessError(
+                f"{day} : {rows} lignes reçues, {expected} attendues selon la source"
+            )
         query = {
             "url": client.url,
             "$select": ",".join(SOURCE_COLUMNS),
