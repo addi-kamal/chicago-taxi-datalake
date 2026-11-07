@@ -62,7 +62,8 @@ Sous Windows/macOS, augmenter la mémoire dans *Docker Desktop → Settings → 
 ## 2. Lancement pas à pas
 
 ```bash
-git clone <ce-repo> && cd <ce-repo>
+git clone https://github.com/addi-kamal/chicago-taxi-datalake.git
+cd chicago-taxi-datalake
 
 # 1. générer .env : secrets aléatoires, le reste repris de .env.example
 python scripts/generate_env.py          # ou : make env
