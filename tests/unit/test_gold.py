@@ -6,6 +6,7 @@ import csv
 from decimal import Decimal
 
 import pytest
+from pyspark.sql import Column
 from pyspark.sql import functions as F
 
 from taxi_pipeline.gold import aggregates as agg
@@ -77,6 +78,23 @@ def test_duration_stats_exclude_outliers(trips) -> None:  # type: ignore[no-unty
     row = stats.where(F.col("trip_date") == "2023-01-01").first()
     assert row["day_of_week"] == 7 and row["day_label"] == "7-Dim"  # 01/01/2023 = dimanche
     assert stats.where(F.col("median_duration_min") > F.col("p90_duration_min")).count() == 0
+
+
+def test_speed_is_exactly_reaggregable(trips) -> None:  # type: ignore[no-untyped-def]
+    stats = agg.trip_duration_stats(trips)
+    clean = trips.where(~F.col("is_duration_outlier") & ~F.col("is_distance_outlier"))
+
+    def speed(miles: str, seconds: str) -> Column:
+        return F.sum(miles) / (F.sum(seconds) / F.lit(3600.0))
+
+    expected = clean.agg(speed("trip_miles", "trip_seconds")).first()[0]
+    got = stats.agg(speed("sum_trip_miles", "sum_trip_seconds")).first()[0]
+
+    assert abs(got - expected) < 1e-9
+    assert (
+        stats.agg(F.sum("sum_trip_seconds")).first()[0]
+        == clean.agg(F.sum("trip_seconds")).first()[0]
+    )
 
 
 def test_company_ranking(trips) -> None:  # type: ignore[no-untyped-def]

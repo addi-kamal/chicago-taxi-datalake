@@ -93,6 +93,10 @@ def trip_duration_stats(trips: DataFrame) -> DataFrame:
             F.round(F.sum("trip_miles") / (F.sum("trip_seconds") / F.lit(3600.0)), 2).alias(
                 "avg_speed_mph"
             ),
+            # Mesures additives : la vitesse d'une période se recalcule à la lecture
+            # (Σ miles / Σ heures). Un ratio ne se ré-agrège pas.
+            F.sum("trip_miles").alias("sum_trip_miles"),
+            F.sum("trip_seconds").alias("sum_trip_seconds"),
         )
         .select(
             "trip_date",
@@ -106,6 +110,8 @@ def trip_duration_stats(trips: DataFrame) -> DataFrame:
             F.col("p90_duration_min").cast("double"),
             F.col("avg_distance_miles").cast("double"),
             F.col("avg_speed_mph").cast("double"),
+            F.col("sum_trip_miles").cast("double"),
+            F.col("sum_trip_seconds").cast("bigint"),
         )
     )
 

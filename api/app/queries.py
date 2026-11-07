@@ -111,7 +111,8 @@ def monthly_revenue(start: date, end: date) -> Query:
 
 def durations_by_hour(start: date, end: date, day_of_week: int | None) -> Query:
     # Moyennes pondérées par le nombre de trajets : une heure à 10 trajets ne doit
-    # pas peser autant qu'une heure à 10 000.
+    # pas peser autant qu'une heure à 10 000. La vitesse est un ratio : recalculée
+    # depuis les mesures additives (Σ miles / Σ heures), pas ré-agrégée.
     dow_filter, params = ("", [start, end])
     if day_of_week is not None:
         dow_filter, params = ("AND day_of_week = ?", [start, end, day_of_week])
@@ -122,7 +123,9 @@ def durations_by_hour(start: date, end: date, day_of_week: int | None) -> Query:
                round(sum(avg_duration_min * trips) / nullif(sum(trips), 0), 2) AS avg_duration_min,
                round(sum(avg_distance_miles * trips) / nullif(sum(trips), 0), 2)
                    AS avg_distance_miles,
-               round(sum(avg_speed_mph * trips) / nullif(sum(trips), 0), 2) AS avg_speed_mph
+               round(sum(sum_trip_miles)
+                     / nullif(CAST(sum(sum_trip_seconds) AS double) / 3600.0, 0), 2)
+                   AS avg_speed_mph
         FROM gold.trip_duration_stats
         WHERE trip_date >= ? AND trip_date < ? {dow_filter}
         GROUP BY trip_hour

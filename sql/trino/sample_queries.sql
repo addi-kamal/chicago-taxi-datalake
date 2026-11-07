@@ -10,12 +10,14 @@ FROM iceberg.gold.daily_revenue
 ORDER BY trip_date;
 
 -- 2. Durée moyenne / médiane / p90 par heure de prise en charge (gold.trip_duration_stats)
---    moyenne pondérée par le nombre de trajets de chaque (jour, heure)
+--    durée : moyenne pondérée par le nombre de trajets de chaque (jour, heure)
+--    vitesse : Σ miles / Σ heures, recalculée depuis les mesures additives
 SELECT trip_hour,
        sum(trips)                                            AS trips,
        round(sum(avg_duration_min * trips) / sum(trips), 1)  AS avg_duration_min,
        round(approx_percentile(median_duration_min, 0.5), 1) AS median_of_daily_medians,
-       round(sum(avg_speed_mph * trips) / sum(trips), 1)     AS avg_speed_mph
+       round(sum(sum_trip_miles)
+             / (CAST(sum(sum_trip_seconds) AS double) / 3600.0), 1) AS avg_speed_mph
 FROM iceberg.gold.trip_duration_stats
 GROUP BY trip_hour
 ORDER BY trip_hour;

@@ -159,7 +159,9 @@ GOLD_TRIP_DURATION = TableSpec(
     median_duration_min DOUBLE,
     p90_duration_min DOUBLE,
     avg_distance_miles DOUBLE,
-    avg_speed_mph DOUBLE""",
+    avg_speed_mph DOUBLE,
+    sum_trip_miles DOUBLE,
+    sum_trip_seconds BIGINT""",
     partitioned_by="trip_month",
     comment="Durées / distances / vitesses par jour et heure de prise en charge (hors outliers)",
 )

@@ -329,7 +329,7 @@ Toutes les tables : Iceberg **format v2**, Parquet **zstd**, DDL explicite dans
 | `tip_rate` | Σ `tips` / Σ `fare`. Les pourboires en espèces ne sont pas déclarés dans la source : taux sous-estimé pour le cash |
 | `active_taxis` | nombre de `taxi_id` distincts |
 | Durées | `trip_seconds` / 60 (la durée fiable : les timestamps source sont arrondis au quart d'heure) ; médiane et p90 par `percentile_approx` |
-| `avg_speed_mph` | Σ miles / Σ heures (vitesse moyenne pondérée, pas une moyenne de vitesses) |
+| `avg_speed_mph` | Σ miles / Σ heures (vitesse moyenne pondérée, pas une moyenne de vitesses). `trip_duration_stats` stocke aussi `sum_trip_miles` et `sum_trip_seconds`, des mesures additives : la vitesse d'une période (par heure, par jour de la semaine, sur un mois) est recalculée à la lecture et reste exacte |
 | `share_of_*` | part dans le total du jour ou du mois (fraction, somme = 1) |
 | `area_rank`, `revenue_rank` | rang dans le mois (1 = premier) |
 
