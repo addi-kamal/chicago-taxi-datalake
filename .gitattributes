@@ -1,0 +1,13 @@
+# Les scripts exécutés dans des conteneurs Linux doivent garder des fins de ligne LF,
+# même quand le repo est cloné sous Windows (core.autocrlf=true).
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.properties text eol=lf
+*.sql text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
+*.csv text eol=lf
+*.png binary

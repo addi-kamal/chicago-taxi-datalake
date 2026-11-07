@@ -1,0 +1,15 @@
+.git
+.env
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+data
+spark-warehouse
+docs
+*.md
+!README.md
+assets

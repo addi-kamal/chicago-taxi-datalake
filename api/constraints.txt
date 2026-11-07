@@ -1,0 +1,30 @@
+# Versions exactes de TOUTES les dépendances (y compris transitives), figées le 2026-11-07.
+# Régénérer : docker compose exec api pip freeze > api/constraints.txt (puis retirer pip/setuptools).
+annotated-types==0.8.0
+anyio==4.16.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+click==8.5.1
+fastapi==0.115.12
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.1
+lz4==4.4.5
+packaging==26.3
+pluggy==1.7.0
+pydantic==2.10.6
+pydantic_core==2.27.2
+pytest==8.3.4
+python-dateutil==4.0.0
+pytz==2026.6
+requests==2.34.2
+starlette==0.46.2
+trino==0.332.0
+typing_extensions==4.16.0
+tzdata==2026.6
+tzlocal==5.4.5
+urllib3==2.8.0
+uvicorn==0.34.0
+zstandard==0.25.0

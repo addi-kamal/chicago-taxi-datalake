@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taxi-pipeline"
+version = "1.0.0"
+description = "Pipeline médaillon Chicago Taxi Trips : SODA -> MinIO/Ceph -> Iceberg (Spark) -> Trino -> Superset, orchestré par Airflow."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+# Versions alignées sur les contraintes officielles d'Airflow 2.10.5 / Python 3.11
+# (https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.11.txt)
+dependencies = [
+    "pyspark==3.5.4",
+    "boto3==1.36.3",
+    "requests==2.32.3",
+    "pydantic==2.10.6",
+    "pydantic-settings==2.7.1",
+    "trino==0.332.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "ruff==0.9.10",
+    "mypy==1.15.0",
+    "types-requests==2.32.0.20241016",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+    "spark: test nécessitant une SparkSession locale (Java requis)",
+    "integration: test nécessitant la stack Docker Compose (MinIO, Postgres, Trino)",
+]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "dags", "tests", "scripts", "api"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RUF", "N"]
+ignore = ["RUF001", "RUF002", "RUF003", "N812"]  # accents FR ; `functions as F` (idiome PySpark)
+
+[tool.ruff.lint.isort]
+known-first-party = ["taxi_pipeline", "app"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["taxi_pipeline"]
+strict = true
+ignore_missing_imports = true
+warn_unused_ignores = false

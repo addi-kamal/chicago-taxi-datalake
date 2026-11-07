@@ -1,0 +1,299 @@
+# =============================================================================
+#  Datalake Chicago Taxi - POC local
+#  MinIO (S3) + Iceberg (catalogue JDBC/PostgreSQL) + Spark + Trino + Superset,
+#  orchestré par Airflow.
+#
+#      docker compose up -d --build
+#
+#  Le DAG `chicago_taxi_e2e` démarre automatiquement : ingestion -> bronze ->
+#  silver -> gold -> validation Trino -> publication du dashboard Superset.
+#  Les secrets n'ont pas de valeur par défaut : générer `.env` au préalable
+#  (python scripts/generate_env.py). Les autres paramètres ont un défaut.
+# =============================================================================
+name: chicago-taxi-datalake
+
+x-storage-env: &storage-env
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-datalake}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:?lancer scripts/generate_env.py}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_PATH_STYLE: ${S3_PATH_STYLE:-true}
+  S3_USE_SSL: ${S3_USE_SSL:-false}
+  AWS_REQUEST_CHECKSUM_CALCULATION: ${AWS_REQUEST_CHECKSUM_CALCULATION:-when_required}
+  AWS_RESPONSE_CHECKSUM_VALIDATION: ${AWS_RESPONSE_CHECKSUM_VALIDATION:-when_required}
+  ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-iceberg}
+  ICEBERG_CATALOG_URI: ${ICEBERG_CATALOG_URI:-jdbc:postgresql://postgres:5432/iceberg_catalog}
+  ICEBERG_CATALOG_USER: ${ICEBERG_CATALOG_USER:-iceberg}
+  ICEBERG_CATALOG_PASSWORD: ${ICEBERG_CATALOG_PASSWORD:?lancer scripts/generate_env.py}
+  ICEBERG_WAREHOUSE: ${ICEBERG_WAREHOUSE:-s3://bronze/warehouse}
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  image: chicago-taxi/airflow-spark:1.0.0
+  environment: &airflow-env
+    <<: *storage-env
+    # --- Airflow ---------------------------------------------------------------
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:?lancer scripts/generate_env.py}@postgres:5432/airflow
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__PARALLELISM: "8"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "8"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: utc
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?lancer scripts/generate_env.py}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:?lancer scripts/generate_env.py}
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    AIRFLOW__WEBSERVER__INSTANCE_NAME: "Datalake - Chicago Taxi (POC)"
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+    # --- Pipeline ----------------------------------------------------------------
+    PIPELINE_SOURCE: ${PIPELINE_SOURCE:-soda}
+    PIPELINE_START_DATE: ${PIPELINE_START_DATE:-2023-01-01}
+    PIPELINE_END_DATE: ${PIPELINE_END_DATE:-2023-01-08}
+    DQ_MAX_REJECT_PCT: ${DQ_MAX_REJECT_PCT:-5}
+    SODA_APP_TOKEN: ${SODA_APP_TOKEN:-}
+    SODA_DATASET_ID: ${SODA_DATASET_ID:-wrvz-psew}
+    SODA_PAGE_SIZE: ${SODA_PAGE_SIZE:-50000}
+    EXTRACT_PARALLELISM: ${EXTRACT_PARALLELISM:-4}
+    SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+    SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-3g}
+    SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-16}
+    TRINO_HOST: ${TRINO_HOST:-trino}
+    TRINO_PORT: ${TRINO_PORT:-8080}
+    SUPERSET_URL: http://superset:8088
+    SUPERSET_PUBLIC_URL: http://localhost:${SUPERSET_HOST_PORT:-8088}
+    SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-superset_admin}
+    SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:?lancer scripts/generate_env.py}
+  volumes:
+    - airflow-logs:/opt/airflow/logs
+  restart: unless-stopped
+
+services:
+  # --------------------------------------------------------------------------
+  # Socle : métadonnées (Airflow, catalogue Iceberg, Superset) + stockage objet
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16.9
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?lancer scripts/generate_env.py}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    # MinIO ne publie plus d'images communautaires (fin 2025) : fork maintenu,
+    # tag figé. En production : Ceph RGW (même API S3, même code).
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-06-18T00-00-00Z}
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-datalake}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?lancer scripts/generate_env.py}
+    ports:
+      - "${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Initialisation one-shot : bases + rôles PostgreSQL, buckets S3,
+  # migrations Airflow, compte admin, pool Spark.
+  init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        python -m taxi_pipeline.infra.bootstrap
+        airflow db migrate
+        airflow users create --role Admin \
+          --username "$${AIRFLOW_ADMIN_USER}" --password "$${AIRFLOW_ADMIN_PASSWORD}" \
+          --firstname Airflow --lastname Datalake --email airflow@datalake.local \
+          || echo "Utilisateur Airflow déjà présent"
+        airflow pools set spark 1 "Jobs Spark locaux, executes un par un"
+        echo "Initialisation terminee"
+    environment:
+      <<: *airflow-env
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?lancer scripts/generate_env.py}
+      AIRFLOW_DB_USER: ${AIRFLOW_DB_USER:-airflow}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:?lancer scripts/generate_env.py}
+      SUPERSET_DB_USER: ${SUPERSET_DB_USER:-superset}
+      SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD:?lancer scripts/generate_env.py}
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER:-airflow_admin}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?lancer scripts/generate_env.py}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  # --------------------------------------------------------------------------
+  # Orchestration + processing (Spark local[*] dans les tâches Airflow)
+  # --------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "${AIRFLOW_HOST_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    ports:
+      - "${SPARK_UI_HOST_PORT:-4040}:4040"   # Spark UI du job en cours
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8974/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Couche OLAP / exposition
+  # --------------------------------------------------------------------------
+  trino:
+    image: trinodb/trino:482
+    environment:
+      <<: *storage-env
+    volumes:
+      - ./docker/trino/catalog:/etc/trino/catalog:ro
+    ports:
+      - "${TRINO_HOST_PORT:-8080}:8080"
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  superset:
+    build:
+      context: .
+      dockerfile: docker/superset/Dockerfile
+    image: chicago-taxi/superset:1.0.0
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:?lancer scripts/generate_env.py}
+      SUPERSET_DB_USER: ${SUPERSET_DB_USER:-superset}
+      SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD:?lancer scripts/generate_env.py}
+      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-superset_admin}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:?lancer scripts/generate_env.py}
+      POSTGRES_HOST: postgres
+    ports:
+      - "${SUPERSET_HOST_PORT:-8088}:8088"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Client SQL web (DBeaver CloudBeaver) : exploration ad hoc des tables via Trino.
+  # La connexion « Trino - Datalake (iceberg) » est préconfigurée au premier démarrage.
+  dbeaver:
+    image: dbeaver/cloudbeaver:26.2.3
+    environment:
+      # Configuration automatique (pas d'assistant d'installation au premier accès).
+      CB_SERVER_NAME: "Datalake Chicago Taxi"
+      CB_ADMIN_NAME: ${DBEAVER_ADMIN_USER:-cbadmin}
+      CB_ADMIN_PASSWORD: ${DBEAVER_ADMIN_PASSWORD:?lancer scripts/generate_env.py}
+      CLOUDBEAVER_APP_ANONYMOUS_ACCESS_ENABLED: "false"
+      CLOUDBEAVER_CORE_LOCALIZATION: fr
+    volumes:
+      - dbeaver-workspace:/opt/cloudbeaver/workspace
+      - ./docker/dbeaver/initial-data-sources.conf:/opt/cloudbeaver/conf/initial-data-sources.conf:ro
+    ports:
+      - "${DBEAVER_HOST_PORT:-8978}:8978"
+    healthcheck:
+      # Pas de curl dans l'image : requête HTTP via /dev/tcp.
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/8978
+          && printf "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3
+          && head -1 <&3 | grep -q " 200 "'
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    depends_on:
+      trino:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # API REST (FastAPI) de lecture de la couche gold, via Trino. Doc : http://localhost:8000/docs
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    image: chicago-taxi/api:1.0.0
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_USER: api
+      TRINO_CATALOG: ${ICEBERG_CATALOG_NAME:-iceberg}
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      trino:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+  airflow-logs:
+  dbeaver-workspace:

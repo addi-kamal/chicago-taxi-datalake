@@ -1,0 +1,7 @@
+# Dépendances ajoutées à l'image Airflow 2.10.5.
+# Installées avec le fichier de contraintes officiel d'Airflow : les versions
+# ci-dessous y sont identiques (pyspark, trino, pytest) ou compatibles.
+pyspark==3.5.4
+pydantic-settings==2.7.1
+trino==0.332.0
+pytest==8.3.4

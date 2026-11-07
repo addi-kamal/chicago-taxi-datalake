@@ -1,0 +1,5 @@
+# API de lecture de la couche gold. Versions figées (reproductibilité).
+fastapi==0.115.12
+uvicorn==0.34.0
+pydantic==2.10.6
+trino==0.332.0
